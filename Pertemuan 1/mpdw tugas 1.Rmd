@@ -1,0 +1,339 @@
+---
+title: "mpdw 1"
+author: "Nur Aulina"
+date: "2025-08-30"
+output: html_document
+---
+
+
+```{r}
+library(readxl)
+library(forecast)
+library(graphics)
+library(TTR)
+library(TSA)
+library(ggplot2)
+library(tseries)
+library("rio")
+```
+
+```{r}
+dataa <- import ("https://github.com/kamaldims/MPDW/raw/main/Kurs%20Jual%20Rataan%20USD%20Fix.xlsx")
+```
+
+```{r}
+data <- dataa[105:208,]
+```
+
+
+### <span style="color:maroon"><b>Eksplorasi Data Awal</b></span>
+```{r}
+View(data)
+str(data)
+dim(data)
+```
+
+### <span style="color:maroon"><b>Mengubah menjadi data deret waktu</b></span>
+
+```{r}
+ts_data <- ts(data$`Kurs Jual Rataan`)
+```
+
+menampilkan ringkasan data
+```{r}
+summary(ts_data)
+```
+
+Membuat plot data deret waktu
+```{r}
+ts.plot(ts_data, xlab="Minggu Ke-", ylab="Kurs Jual Rataan", main="Time Series Plot")
+points(ts_data)
+```
+
+
+### <span style="color:maroon"><b>Uji Stasioneritas</b></span>
+```{r}
+adf_result <- adf.test(ts_data)
+kpss_result <- kpss.test(ts_data)
+
+cat("ADF Test p-value:", adf_result$p.value, "\n")
+cat("KPSS Test p-value:", kpss_result$p.value, "\n")
+
+if (adf_result$p.value > 0.05) {
+  cat("Data TIDAK STASIONER - Gunakan DES atau DMA\n")
+} else {
+  cat("Data STASIONER - Bisa gunakan SES atau SMA\n")
+}
+```
+Karena datanya merupakan data non stationer yakni data tren, maka akan dilakukan pemulusan dengan membandingkan metode Double Moving Average (DMA) dan Double Exponential Smoothing (DES).
+
+## <span style="color:maroon"><b>Pembagian Data Training dan Testing</b></span>
+```{r}
+training <- data[1:83,]
+testing <- data[84:104,]
+traints <- ts(training$`Kurs Jual Rataan`)
+testts <- ts(testing$`Kurs Jual Rataan`)
+```
+
+## <span style="color:maroon"><b>Eksplorasi Visual Data</b></span>
+```{r}
+plot(ts_data, col="red", main="Plot Semua Data")
+points(ts_data)
+
+plot(traints, col="blue", main="Plot Data Latih")
+points(traints)
+
+plot(testts, col="green", main="Plot Data Uji")
+points(testts)
+
+
+ggplot() + 
+  geom_line(data = training, aes(x = `Minggu Ke-`, y = `Kurs Jual Rataan`, col = "Data Latih")) +
+  geom_line(data = testing, aes(x = `Minggu Ke-`, y = `Kurs Jual Rataan`, col = "Data Uji")) +
+  labs(x = "Minggu Ke-", y = "Kurs Jual Rataan", color = "Legend") +
+  scale_colour_manual(name = "Keterangan:", 
+                      breaks = c("Data Latih", "Data Uji"),
+                      values = c("blue", "red")) + 
+  theme_bw() + 
+  theme(legend.position = "bottom",
+        plot.caption = element_text(hjust = 0.5, size = 12))
+```
+
+### <span style="color:maroon"><b>Pemilihan Window Size untuk Moving Average</b></span>
+```{r}
+kurs <- data$`Kurs Jual Rataan`
+
+calculate_mse <- function(actual, predicted) {
+  non_na_indices <- !is.na(predicted)
+  mean((actual[non_na_indices] - predicted[non_na_indices])^2)
+}
+
+ma3 <- ma(kurs, order = 3)
+ma4 <- ma(kurs, order = 4)
+ma5 <- ma(kurs, order = 5)
+ma7 <- ma(kurs, order = 7)
+ma10 <- ma(kurs, order = 10)
+
+mse_values <- c(
+  mse3 = calculate_mse(kurs, ma3),
+  mse4 = calculate_mse(kurs, ma4),
+  mse5 = calculate_mse(kurs, ma5),
+  mse7 = calculate_mse(kurs, ma7),
+  mse10 = calculate_mse(kurs, ma10)
+)
+
+best_window <- as.numeric(gsub("mse", "", names(which.min(mse_values))))
+cat("Window size terbaik:", best_window, "\n")
+```
+
+## <span style="color:maroon"><b>Double Moving Average (DMA)</b></span>
+```{r}
+m <- best_window
+
+# 1. SMA dan DMA untuk data training
+data.SMA <- ma(traints, order = m)
+data.DMA <- ma(data.SMA, order = m)
+
+# 2. menghitung At dan Bt untuk data training
+At <- 2 * data.SMA - data.DMA
+Bt <- (2 / (m - 1)) * (data.SMA - data.DMA)
+
+# 3. Peramalan untuk data training
+data.ramall2 <- At + Bt
+
+# 4. Peramalan untuk data testing (21 periode ke depan)
+last_valid_At <- tail(na.omit(At), 1)
+last_valid_Bt <- tail(na.omit(Bt), 1)
+
+f <- numeric(21)
+for (i in 1:21) {
+  f[i] <- last_valid_At + i * last_valid_Bt
+}
+
+n_total <- length(traints) + 21
+ramalan.vec <- c(data.ramall2, f)  
+ramalan.vec <- ramalan.vec[1:n_total]  
+
+data.gabb2 <- cbind(
+  aktual = c(traints, rep(NA, 21)),
+  pemulusan1 = c(data.SMA, rep(NA, 21)),
+  pemulusan2 = c(data.DMA, rep(NA, 21)),
+  At = c(At, rep(NA, 21)),
+  Bt = c(Bt, rep(NA, 21)),
+  ramalan = ramalan.vec
+)
+
+data.gabb2
+```
+
+## <span style="color:maroon"><b>Visualisasi DMA</b></span>
+```{r}
+ts.plot(ts_data, xlab = "Minggu Ke-", ylab = "Kurs Jual Rataan", 
+        main = paste("DMA dengan N =", m, "Data Kurs Jual Rataan"))
+points(ts_data)
+
+# Plot pemulusan training
+lines(1:length(traints), data.gabb2[1:length(traints), 3], col = "green", lwd = 2)
+
+# Plot ramalan testing (periode 84-104)
+lines(84:104, data.gabb2[84:104, 6], col = "red", lwd = 2, lty = 2)
+
+legend("topleft", 
+       c("Data Aktual", "Pemulusan Training", "Ramalan Testing"), 
+       lty = c(1, 1, 2), 
+       col = c("black", "green", "red"), 
+       cex = 0.8)
+```
+
+## <span style="color:maroon"><b>Akurasi DMA</b></span>
+```{r}
+calculate_accuracy <- function(actual, predicted) {
+
+  non_na_idx <- !is.na(actual) & !is.na(predicted)
+  actual_clean <- actual[non_na_idx]
+  predicted_clean <- predicted[non_na_idx]
+  
+  if (length(actual_clean) == 0) {
+    return(c(SSE = NA, MSE = NA, MAPE = NA))
+  }
+  
+  error <- actual_clean - predicted_clean
+  SSE <- sum(error^2)
+  MSE <- mean(error^2)
+  
+  non_zero <- actual_clean != 0
+  if (sum(non_zero) > 0) {
+    MAPE <- mean(abs(error[non_zero] / actual_clean[non_zero]) * 100)
+  } else {
+    MAPE <- NA
+  }
+  
+  return(c(SSE = SSE, MSE = MSE, MAPE = MAPE))
+}
+
+# AKURASI DATA LATIH DMA
+train_indices <- which(!is.na(data.ramall2))
+akurasi_train.dma <- calculate_accuracy(traints[train_indices], data.ramall2[train_indices])
+
+# AKURASI DATA UJI DMA
+test_actual <- testts[1:21]  
+test_predicted <- f[1:21]  
+
+akurasi_test.dma <- calculate_accuracy(test_actual, test_predicted)
+
+# OUTPUT HASIL
+akurasi_matrix_train <- matrix(akurasi_train.dma)
+row.names(akurasi_matrix_train) <- c("SSE", "MSE", "MAPE")
+colnames(akurasi_matrix_train) <- paste("Akurasi m =", m)
+
+akurasi_matrix_test <- matrix(akurasi_test.dma)
+row.names(akurasi_matrix_test) <- c("SSE", "MSE", "MAPE")
+colnames(akurasi_matrix_test) <- paste("Akurasi m =", m)
+
+print("Akurasi Data Latih DMA:")
+print(akurasi_matrix_train)
+
+print("Akurasi Data Uji DMA:")
+print(akurasi_matrix_test)
+```
+Perhitungan akurasi menggunakan data latih menghasilkan nilai MAPE sebesar 0.148% yang jauh kurang dari 10%, sehingga nilai akurasi ini dapat dikategorikan sebagai SANGAT BAIK. Metode Double Moving Average mampu memodelkan pola data training dengan exceptional accuracy, menunjukkan bahwa model sangat well-fitted terhadap data historis.
+
+Perhitungan akurasi menggunakan data uji menghasilkan nilai MAPE sebesar 7.695% yang masih kurang dari 10%, sehingga nilai akurasi ini juga dapat dikategorikan sebagai SANGAT BAIK. Model DMA menunjukkan kemampuan generalisasi yang excellent dengan error peramalan rata-rata hanya 7.7% dari nilai aktual, yang termasuk dalam kategori highly accurate forecasting.
+
+
+## <span style="color:maroon"><b>Double Exponential Smoothing (DES)</b></span>
+```{r}
+des.1 <- HoltWinters(traints, gamma = FALSE, beta = 0.2, alpha = 0.2)
+des.2 <- HoltWinters(traints, gamma = FALSE, beta = 0.3, alpha = 0.6)
+des.opt <- HoltWinters(traints, gamma = FALSE)
+
+print("Parameter DES Optimum:")
+print(des.opt$alpha)
+print(des.opt$beta)
+
+par(mar = c(4, 4, 2, 1))  
+
+# Plot DES satu per satu
+plot(des.1, main = "DES: alpha=0.2, beta=0.2")
+plot(des.2, main = "DES: alpha=0.6, beta=0.3")
+plot(des.opt, main = "DES dengan Parameter Optimum")
+
+par(mfrow = c(1, 3), mar = c(3, 3, 2, 1))
+plot(des.1, main = "DES: alpha=0.2, beta=0.2")
+plot(des.2, main = "DES: alpha=0.6, beta=0.3")
+plot(des.opt, main = "DES Optimum")
+
+par(mfrow = c(1, 1), mar = c(5, 4, 4, 2) + 0.1)
+
+ramalandess1 <- forecast(des.1, h = 21)  # Ubah h=10 menjadi h=21 untuk match testing data
+ramalandess2 <- forecast(des.2, h = 21)
+ramalandesopt <- forecast(des.opt, h = 21)
+
+# Visualisasi Perbandingan DES
+plot(ts_data, main = "Perbandingan DES dengan Data Aktual", 
+     xlab = "Minggu Ke-", ylab = "Kurs Jual Rataan")
+lines(des.1$fitted[, 1], col = "blue", lwd = 2)
+lines(des.opt$fitted[, 1], col = "red", lwd = 2)
+
+lines(84:104, ramalandesopt$mean, col = "purple", lwd = 2, lty = 2)
+
+legend("topleft", 
+       legend = c("Aktual", "DES (0.2,0.2)", "DES Optimum", "Ramalan Optimum"), 
+       col = c("black", "blue", "red", "purple"), 
+       lwd = 2, lty = c(1, 1, 1, 2),
+       cex = 0.8)
+```
+
+## <span style="color:maroon"><b>Akurasi DES</b></span>
+```{r}
+calculate_des_accuracy_test <- function(forecast, actual) {
+  min_length <- min(length(forecast$mean), length(actual))
+  
+  valid_indices <- !is.na(forecast$mean[1:min_length]) & !is.na(actual[1:min_length])
+  
+  if (sum(valid_indices) == 0) {
+    return(c(SSE = NA, MSE = NA, MAPE = NA))
+  }
+  
+  error <- forecast$mean[1:min_length][valid_indices] - actual[1:min_length][valid_indices]
+  
+  SSE <- sum(error^2)
+  MSE <- mean(error^2)
+  
+  actual_values <- actual[1:min_length][valid_indices]
+  non_zero <- actual_values != 0
+  if (sum(non_zero) > 0) {
+    MAPE <- mean(abs(error[non_zero] / actual_values[non_zero]) * 100)
+  } else {
+    MAPE <- NA
+  }
+  
+  return(c(SSE = SSE, MSE = MSE, MAPE = MAPE))
+}
+
+actual21 <- testing$`Kurs Jual Rataan`[1:21]
+
+akurasi_des1_test <- calculate_des_accuracy_test(ramalandess1, actual21)
+akurasi_des2_test <- calculate_des_accuracy_test(ramalandess2, actual21)
+akurasi_desopt_test <- calculate_des_accuracy_test(ramalandesopt, actual21)
+
+akurasi_des_test <- cbind(akurasi_des1_test, akurasi_des2_test, akurasi_desopt_test)
+colnames(akurasi_des_test) <- c("DES (0.2,0.2)", "DES (0.6,0.3)", "DES Optimum")
+
+print("Akurasi Data Uji DES:")
+print(akurasi_des_test)
+```
+
+Hasil akurasi dari data uji didapatkan skenario DES dengan parameter alpha=0.6 dan beta=0.3 memiliki hasil yang lebih baik dibandingkan parameter alpha=0.2 dan beta=0.2, dengan nilai MAPE yang lebih rendah yaitu 10.96% dibandingkan 11.82%. Namun untuk kedua skenario masih dapat dikategorikan peramalan baik berdasarkan nilai MAPE-nya yang berada di bawah 20%.
+
+Parameter optimum menunjukkan hasil yang tidak expected dengan MAPE sangat tinggi (99.65%), mengindikasikan kemungkinan overfitting pada data training atau masalah dalam proses optimasi parameter. Hal ini memerlukan investigasi lebih lanjut.
+
+
+## <span style="color:maroon"><b>Kesimpulan</b></span>
+Berdasarkan hasil analisis perbandingan antara metode Double Moving Average (DMA) dan Double Exponential Smoothing (DES), dapat disimpulkan bahwa metode DMA dengan window size 3 merupakan metode yang lebih unggul untuk pemulusan dan peramalan data kurs USD ini. Hal ini ditunjukkan oleh nilai MAPE testing sebesar 7.69% yang termasuk dalam kategori sangat baik (dibawah 10%), yang secara signifikan mengungguli semua varian DES termasuk DES optimum yang menghasilkan MAPE testing sebesar 99.65%. Keunggulan DMA tidak hanya terlihat pada akurasi testing yang lebih tinggi, tetapi juga pada konsistensi performa yang excellent antara data training dengan MAPE 0.15% dan data testing dengan MAPE 7.69%, menunjukkan stabilitas model yang sangat baik. Sementara DES menunjukkan kelemahan serius dengan nilai MAPE testing yang sangat tinggi pada parameter optimum, mengindikasikan terjadinya overfitting yang parah. Dengan demikian, Double Moving Average terbukti lebih reliable dan efektif untuk peramalan kurs USD pada dataset ini, memberikan tingkat akurasi yang tinggi untuk mendukung pengambilan keputusan finansial.
+
+
+
+
+
+
