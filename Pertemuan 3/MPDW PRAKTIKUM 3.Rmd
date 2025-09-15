@@ -1,0 +1,497 @@
+---
+title: "Untitled"
+author: "Nur Aulina"
+date: "2025-09-14"
+output: html_document
+---
+
+
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(GGally)
+library(lmtest)
+library(dLagM)
+library(forecast)
+library(lubridate)
+```
+
+
+```{r}
+# Import data
+data <- read_csv("C:/Users/ASUS/Downloads/NewDelhi_Air_quality.csv")
+
+# Drop kolom tidak penting jika ada
+data <- data %>% select(-any_of(c("...1","ts","timestamp_local","timestamp_utc")))
+
+# Parsing datetime (jika ada)
+if("datetime" %in% names(data)){
+  data <- data %>% mutate(datetime = ymd_h(datetime))
+}
+
+# Cek struktur & ringkasan
+str(data)
+summary(data)
+```
+
+```{r}
+# ==========================
+# 2. Eksplorasi Variabel
+# ==========================
+subset_data <- data %>% 
+  select(AQI, CO, no2, o3, pm10, pm25, so2)
+
+ggpairs(subset_data,
+        upper = list(continuous = wrap("cor", size = 4, colour = "blue")),
+        lower = list(continuous = wrap("points", alpha = 0.7, size = 2, 
+                                       mapping = aes(color = cut(AQI, breaks = 3)))),
+        diag = list(continuous = wrap("densityDiag", alpha = 0.6, fill = "lightblue")))
+
+# Dari eksplorasi: o3 memiliki korelasi tertinggi dengan AQI → dipilih sebagai X
+```
+Dari eksplorasi, o3 memiliki korelasi paling tinggi (0.974) dengan AQI sehingga akan dipilih sebagai X. Selain itu, terdapat artikel yang menyatakan bahwa di sejumlah kota di dunia, O₃ menjadi polutan dominan yang menyebabkan memburuknya kualitas udara.
+
+Sumber: https://onlinelibrary.wiley.com/doi/epdf/10.1002/gch2.202300258
+
+```{r}
+# Hitung jumlah baris
+n <- nrow(data)
+
+# Tentukan ukuran train (80%)
+n_train <- round(0.8 * n)
+
+# Split data
+train <- data[1:n_train, c("AQI", "o3", "datetime")]
+test <- data[(n_train+1):n, c("AQI", "o3", "datetime")]
+
+# Konversi ke time series
+train.ts <- ts(train)
+test.ts  <- ts(test)
+data.ts  <- ts(data[, c("AQI", "o3")])
+```
+
+```{r}
+# Pengecekan Asumsi Autokorelasi
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+
+acf(train$AQI, main = "ACF AQI", col = "blue", lwd = 2)
+pacf(train$AQI, main = "PACF AQI", col = "red", lwd = 2)
+acf(train$o3, main = "ACF o3", col = "green", lwd = 2)
+pacf(train$o3, main = "PACF o3", col = "purple", lwd = 2)
+```
+```{r}
+library(lmtest)
+dw_test <- dwtest(lm(AQI ~ o3, data = train))
+cat("Durbin-Watson p-value:", dw_test$p.value, "\n")
+
+# Jika p-value < 0.05, konfirmasi adanya autokorelasi
+```
+
+```{r}
+#MODEL KOYCK
+model.koyck <- koyckDlm(x = train$o3, y = train$AQI)
+summary(model.koyck)
+AIC(model.koyck)
+BIC(model.koyck)
+```
+**Interpretasi Hasil:**
+
+-   Dari `summary`, kita dapatkan model:
+
+    $$ \hat{Y_t}=0.2626+0.2582X_t+0.4294Y_{t-1} $$
+
+    Koefisien $X_t$ (0.2582) signifikan, artinya nilai \$X\$ saat ini berpengaruh terhadap $Y$.
+
+-   Koefisien $Y_{t−1}$ (0.4214) juga signifikan. Ini adalah **estimasi untuk** $\lambda$. Nilai ini menunjukkan bahwa sekitar 42% dari efek di periode sebelumnya masih "terbawa" ke periode saat ini.
+
+```{r}
+cat("=== HASIL MODEL KOYCK ===\n")
+cat("AIC:", AIC(model.koyck), "\n")
+cat("BIC:", BIC(model.koyck), "\n")
+cat("MAPE Training:", GoF(model.koyck)$MAPE, "%\n")
+
+cat("\nKoefisien Model:\n")
+print(coef(model.koyck))
+
+coefs <- coef(model.koyck)
+pred_1 <- coefs[1] + coefs[3]*test$o3[1] + coefs[2]*tail(train$AQI, 1)
+cat("\nPrediksi 1 periode:", round(pred_1, 2), "\n")
+cat("Aktual 1 periode:", test$AQI[1], "\n")
+```
+
+
+## Regression with Distributed Lag
+### Pemodelan (Lag=2)
+
+```{r}
+model.dlm <- dlm(x = train$o3,y = train$AQI , q = 2)
+summary(model.dlm)
+AIC(model.dlm)
+BIC(model.dlm)
+```
+Dari hasil diatas, didapat bahwa $P-value$ dari intercept dan $x_{t-1}<0.05$. Hal ini menunjukkan bahwa intercept dan $x_{t-1}$ berpengaruh signifikan terhadap $y$. Adapun model keseluruhan yang terbentuk adalah sebagai berikut
+
+$$
+\hat{Y_t}=-0.1705+0.4876X_t-0.0175X_{t-1}-0.0059X_{t-2}
+$$
+
+### Peramalan dan Akurasi
+
+Berikut merupakan hasil peramalan $y$ untuk 5 periode kedepan
+
+```{r}
+coefs <- coef(model.dlm)
+cat("Koefisien model:", coefs, "\n")
+
+# MAPE TRAINING 
+cat("MAPE training:", GoF(model.dlm)$MAPE, "%\n")
+```
+
+### *Lag* Optimum
+```{r}
+#penentuan lag optimum 
+finiteDLMauto(formula = AQI ~ o3,
+              data = data.frame(train), q.min = 1, q.max = 10,
+              model.type = "dlm", error.type = "AIC", trace = TRUE)
+```
+Berdasarkan output tersebut, lag optimum didapatkan ketika lag=10 karena nilai AIC-nya terkecil. Selanjutnya dilakukan pemodelan untuk lag=10
+
+```{r}
+#model dlm dengan lag optimum
+model.dlm2 <- dlm(x = train$o3,y = train$AQI , q = 10)
+summary(model.dlm2)
+AIC(model.dlm2)
+BIC(model.dlm2)
+```
+Dari hasil tersebut terdapat beberapa peubah yang berpengaruh signifikan terhadap taraf nyata 5% yaitu $x_t$ , $x_{t-2}$ , $x_{t-4}$ , $x_{t-6}$. Adapun keseluruhan model yang terbentuk adalah
+
+$$
+\hat{Y_t}=-0.64267+0.42814X_t+...-0.09537X_{t-10}
+$$
+
+Adapun hasil peramalan 5 periode kedepan menggunakan model tersebut adalah sebagai berikut
+
+```{r}
+cat("MAPE training:", GoF(model.dlm2)$MAPE, "%\n")
+cat("AIC:", AIC(model.dlm2), "\n")
+cat("BIC:", BIC(model.dlm2), "\n")
+```
+Model Distributed Lag dengan lag optimum 10 tersebut merupakan model yang sangat baik dengan nilai MAPE training sebesar 0.0074%, yang menunjukkan tingkat akurasi yang sangat tinggi dalam memprediksi AQI berdasarkan variabel o3.
+
+## Model Autoregressive
+### Pemodelan
+```{r}
+model.ardl <- ardlDlm(x = train$o3, y = train$AQI, p = 1 , q = 1)
+summary(model.ardl)
+AIC(model.ardl)
+BIC(model.ardl)
+```
+
+```{r}
+model.ardl <- ardlDlm(formula = AQI ~ o3, 
+                         data = train,p = 1 , q = 1)
+summary(model.ardl)
+AIC(model.ardl)
+BIC(model.ardl)
+```
+Hasil di atas menunjukkan bahwa selain peubah $x_{t-1}$, hasil uji t menunjukkan nilai-p pada peubah $\ge0.05$ Hal ini menunjukkan bahwa peubah $x_{t-1}$ berpengaruh signifikan terhadap $y_t$, sementara $x_t$ dan $y_{t-1}$ berpengaruh signifikan terhadap $y_t$. Model keseluruhannya adalah sebagai berikut:
+
+$$
+\hat{Y}=-0.24530+ 0.48660X_t-0.23184X_{t-1}+0.45632Y_{t-1}
+$$
+
+
+### Peramalan dan Akurasi
+
+```{r}
+# PERAMALAN 5 PERIODE UNTUK ARDL
+coefs <- coef(model.ardl)
+alpha <- coefs[1]    # intercept
+beta0 <- coefs[2]    # x_t
+beta1 <- coefs[3]    # x_{t-1} 
+phi <- coefs[4]      # y_{t-1}
+
+# INISIALISASI
+forecasts <- numeric(5)
+last_y <- tail(train$AQI, 1)
+last_x <- tail(train$o3, 1)
+
+# PERAMALAN 5 PERIODE
+for(i in 1:5) {
+  if(i <= length(test$o3)) {
+    current_x <- test$o3[i]
+  } else {
+    current_x <- mean(test$o3, na.rm = TRUE)  # jika data x habis
+  }
+  
+  forecasts[i] <- alpha + beta0*current_x + beta1*last_x + phi*last_y
+  
+  last_y <- forecasts[i]
+  last_x <- current_x
+}
+
+cat("=== HASIL PERAMALAN 5 PERIODE KE DEPAN ===\n")
+for(i in 1:5) {
+  cat("Periode", i, ": AQI =", round(forecasts[i], 2), "\n")
+}
+```
+Data di atas merupakan hasil peramalan untuk 5 periode ke depan menggunakan Model Autoregressive dengan $p=1$ dan $q=1$.
+
+```{r}
+cat("=== AKURASI MODEL ARDL ===\n")
+cat("AIC:", AIC(model.ardl), "\n")
+cat("BIC:", BIC(model.ardl), "\n")
+cat("MAPE Training:", GoF(model.ardl)$MAPE, "%\n")
+cat("R-squared:", GoF(model.ardl)$R.Adj.Sq, "\n")
+
+if(exists("forecasts")) {
+  mape_manual <- mean(abs((test$AQI[1:5] - forecasts)/test$AQI[1:5])) * 100
+  cat("MAPE 5 periode:", mape_manual, "%\n")
+}
+```
+
+Model ARDL(1,1) tersebut merupakan model yang sangat baik dengan akurasi training 99.99% dan akurasi testing 99.31%, yang menunjukkan kemampuan prediksi yang hampir sempurna baik pada data training maupun testing.
+
+Berdasarkan akurasi di atas, terlihat bahwa nilai MAPE keduanya tidak jauh berbeda. Artinya, model ARDL(1,1) ini tidak mengalami overfitting maupun underfitting, sehingga memiliki kemampuan generalisasi yang sangat baik untuk memprediksi data baru.
+
+
+### *Lag* Optimum
+
+```{r}
+#penentuan lag optimum
+model.ardl.opt <- ardlBoundOrders(data = data.frame(data), ic = "AIC", 
+                                  formula = AQI ~ o3 )
+model.ardl.opt
+min_p=c()
+for(i in 1:6){
+  min_p[i]=min(model.ardl.opt$Stat.table[[i]])
+}
+q_opt=which(min_p==min(min_p, na.rm = TRUE))
+p_opt=which(model.ardl.opt$Stat.table[[q_opt]] == 
+              min(model.ardl.opt$Stat.table[[q_opt]], na.rm = TRUE))
+data.frame("q_optimum" = q_opt, "p_optimum" = p_opt, 
+           "AIC"=model.ardl.opt$min.Stat)
+```
+```{r}
+model.ardl2 <- ardlDlm(formula = AQI ~ o3, 
+                         data = train,p = 6, q = 1)
+summary(model.ardl2)
+```
+Dari tabel di atas, dapat terlihat bahwa nilai AIC terendah didapat ketika $p=6$ dan $q=1$, yaitu sebesar `16.55044`. Artinya, model autoregressive optimum didapat ketika $p=6$ dan $q=1$.
+
+Selanjutnya dapat dilakukan pemodelan dengan nilai $p$ dan $q$ optimum seperti inisialisasi di langkah sebelumnya.
+
+```{r}
+AIC(model.ardl2)
+```
+## Pemodelan DLM & ARDL dengan Library `dynlm`
+
+Pemodelan regresi dengan peubah *lag* tidak hanya dapat dilakukan dengan fungsi pada *packages* `dLagM` , tetapi terdapat *packages* `dynlm` yang dapat digunakan. Fungsi `dynlm` secara umum adalah sebagai berikut.
+
+```{r, eval=FALSE}
+dynlm(formula, data, subset, weights, na.action, method = "qr",
+  model = TRUE, x = FALSE, y = FALSE, qr = TRUE, singular.ok = TRUE,
+  contrasts = NULL, offset, start = NULL, end = NULL, ...)
+```
+```{r}
+library(dynlm)  
+cat("Jumlah duplikat di training:", sum(duplicated(train)), "\n")
+train_clean <- train[!duplicated(train), ]
+cat("Data setelah dibersihkan:", dim(train_clean), "\n")
+
+cons_m1_clean <- dynlm(AQI ~ o3 + L(o3), data = train_clean)
+cons_m2_clean <- dynlm(AQI ~ o3 + L(AQI), data = train_clean)
+cons_m3_clean <- dynlm(AQI ~ o3 + L(o3) + L(AQI), data = train_clean)
+cons_m4_clean <- dynlm(AQI ~ o3 + L(o3) + L(o3, 2), data = train_clean)
+
+train_full <- data[1:n_train, ]  
+
+cons_m1_full <- dynlm(AQI ~ o3 + L(o3), data = train_full)
+cons_m2_full <- dynlm(AQI ~ o3 + L(AQI), data = train_full)
+cons_m3_full <- dynlm(AQI ~ o3 + L(o3) + L(AQI), data = train_full)
+cons_m4_full <- dynlm(AQI ~ o3 + L(o3) + L(o3, 2), data = train_full)
+```
+
+### Ringkasan Model
+```{r}
+summary(cons_m1)
+summary(cons_m2)
+summary(cons_m3)
+summary(cons_m4)
+```
+
+```{r}
+cat("=== PERBANDINGAN MODEL TIME SERIES ===\n")
+cat("1. Koyck Model - AIC:", AIC(model.koyck), "\n")
+cat("2. Distributed Lag (q=10) - AIC:", AIC(model.dlm2), "\n")
+cat("3. ARDL Model - AIC:", AIC(model.ardl), "\n")
+
+# MODEL TERBAIK
+best <- which.min(c(AIC(model.koyck), AIC(model.dlm2), AIC(model.ardl)))
+cat("Model terbaik: Model", c("Koyck", "Distributed Lag", "ARDL")[best], "\n")
+```
+
+### SSE
+
+```{r}
+deviance(cons_m1)
+deviance(cons_m2)
+deviance(cons_m3)
+deviance(cons_m4)
+```
+
+#### Autokorelasi
+```{r}
+library(dplyr)
+library(lmtest)
+
+# Buat variabel lag untuk o3
+test <- test %>%
+  mutate(
+    o3_1 = lag(o3, 1),
+    o3_2 = lag(o3, 2),
+    o3_3 = lag(o3, 3)
+  )
+
+# Buang NA di awal (akibat lag)
+test_clean <- na.omit(test)
+
+# ====== MODEL DLM LAG 2 ======
+model_dlm2 <- lm(AQI ~ o3 + o3_1 + o3_2, data = test_clean)
+summary(model_dlm2)
+
+# Uji Durbin-Watson
+dwtest(model_dlm2)
+
+# ====== MODEL DLM LAG 3 ======
+model_dlm3 <- lm(AQI ~ o3 + o3_1 + o3_2 + o3_3, data = test_clean)
+summary(model_dlm3)
+
+dwtest(model_dlm3)
+
+```
+
+#### Heterogenitas
+
+```{r}
+bptest(cons_m1)
+bptest(cons_m2)
+bptest(cons_m3)
+bptest(cons_m4)
+```
+
+#### Kenormalan
+
+```{r}
+shapiro.test(residuals(cons_m1))
+shapiro.test(residuals(cons_m2))
+shapiro.test(residuals(cons_m3))
+shapiro.test(residuals(cons_m4))
+```
+
+## Perbandingan Model
+
+```{r}
+mape.koyck <- GoF(model.koyck)$MAPE
+mape.dlm <- GoF(model.dlm)$MAPE
+mape.dlm2 <- GoF(model.dlm2)$MAPE  
+mape.ardl <- GoF(model.ardl)$MAPE
+
+akurasi <- matrix(c(mape.koyck, mape.dlm, mape.dlm2, mape.ardl))
+row.names(akurasi) <- c("koyck", "DLM 1", "DLM 2", "Autoregressive")
+colnames(akurasi) <- c("MAPE")
+akurasi
+
+best_model <- which.min(akurasi)
+cat("Model terbaik berdasarkan MAPE:", row.names(akurasi)[best_model], "\n")
+```
+
+Berdasarkan nilai MAPE, model paling optimum didapat pada Model Distributed Lag 2 (Lag 10) karena memiliki nilai MAPE yang terkecil.
+
+
+### Plot
+
+```{r}
+library(dplyr)
+
+# ==============================
+# 1. MODEL Koyck
+# ==============================
+# AQI = α + β o3 + γ AQI(t-1) + e_t
+model.koyck <- lm(AQI ~ o3 + dplyr::lag(AQI, 1), data = test)
+coefs.koyck <- coef(model.koyck)
+
+fore.koyck <- list(
+  forecasts = coefs.koyck[1] +
+              coefs.koyck[2] * test$o3 +
+              coefs.koyck[3] * dplyr::lag(test$AQI, 1)
+)
+
+# ==============================
+# 2. MODEL DLM(1)
+# ==============================
+test <- test %>%
+  mutate(o3_1 = lag(o3, 1))
+
+model.dlm1 <- lm(AQI ~ o3 + o3_1, data = test)
+coefs.dlm1 <- coef(model.dlm1)
+
+fore.dlm <- list(
+  forecasts = coefs.dlm1[1] +
+              coefs.dlm1[2] * test$o3 +
+              coefs.dlm1[3] * test$o3_1
+)
+
+# ==============================
+# 3. MODEL DLM(2)
+# ==============================
+test <- test %>%
+  mutate(o3_2 = lag(o3, 2))
+
+model.dlm2 <- lm(AQI ~ o3 + o3_1 + o3_2, data = test)
+coefs.dlm2 <- coef(model.dlm2)
+
+fore.dlm2 <- list(
+  forecasts = coefs.dlm2[1] +
+              coefs.dlm2[2] * test$o3 +
+              coefs.dlm2[3] * test$o3_1 +
+              coefs.dlm2[4] * test$o3_2
+)
+
+# ==============================
+# 4. MODEL ARDL(1,1)
+# ==============================
+model.ardl <- lm(AQI ~ o3 + o3_1 + lag(AQI, 1), data = test)
+coefs.ardl <- coef(model.ardl)
+
+fore.ardl <- list(
+  forecasts = coefs.ardl[1] +
+              coefs.ardl[2] * test$o3 +
+              coefs.ardl[3] * test$o3_1 +
+              coefs.ardl[4] * lag(test$AQI, 1)
+)
+
+# ==============================
+# 5. PLOT hasil aktual vs forecast
+# ==============================
+par(mfrow = c(1,1))
+plot(test$o3, test$AQI, type="b", col="black",
+     main="Perbandingan Aktual vs Forecast",
+     xlab="o3", ylab="AQI",
+     ylim=range(test$AQI, na.rm=TRUE))
+
+points(test$o3, fore.koyck$forecasts, col="red");    lines(test$o3, fore.koyck$forecasts, col="red")
+points(test$o3, fore.dlm$forecasts, col="blue");     lines(test$o3, fore.dlm$forecasts, col="blue")
+points(test$o3, fore.dlm2$forecasts, col="orange");  lines(test$o3, fore.dlm2$forecasts, col="orange")
+points(test$o3, fore.ardl$forecasts, col="green");   lines(test$o3, fore.ardl$forecasts, col="green")
+
+legend("topleft",
+       c("Aktual","Koyck","DLM(1)","DLM(2)","ARDL(1,1)"),
+       lty=1, col=c("black","red","blue","orange","green"),
+       cex=0.8)
+
+```
+Baik dari hasil perhitungan akurasi (MAPE) maupun dari plot perbandingan aktual vs forecast, model Distributed Lag (DLM) dengan lag 2 terbukti sebagai model terbaik dalam memprediksi AQI berdasarkan variabel O₃.
+
+
