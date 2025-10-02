@@ -1,0 +1,119 @@
+---
+title: "MPDW TUGAS 5"
+author: "Nur Aulina"
+date: "2025-10-01"
+output: html_document
+---
+
+```{r}
+library(rio)
+library(tsibble)
+library(ggplot2)
+library(tseries)
+library(forecast)
+library(MASS)
+```
+
+```{r}
+dataa <- import("https://github.com/kamaldims/MPDW/raw/main/Kurs%20Jual%20Rataan%20USD%20Fix.xlsx")
+data <- dataa[105:208,]
+
+# Asumsikan kolom ke-2 adalah nilai kurs
+kurs <- ts(data[[2]])
+
+head(kurs)
+```
+
+```{r}
+kurs |> as_tsibble() |> 
+  ggplot(aes(x = index, y = value)) + 
+  geom_line(color="blue") + 
+  theme_bw() +
+  xlab("Observasi") + ylab("Kurs USD") +
+  ggtitle("Plot Deret Waktu Kurs USD")
+```
+```{r}
+lattice::densityplot(as.vector(kurs))
+```
+Distribusi kurs pada grafik density tampak tidak normal sempurna, melainkan memiliki lebih dari satu puncak (multimodal). Nilai kurs paling sering berada di kisaran Rp13.500–14.000 dan juga cukup banyak muncul di sekitar Rp15.000. Sebarannya berada antara Rp12.800 hingga Rp16.000, dengan pola yang menunjukkan adanya pergeseran level kurs pada periode tertentu. Hal ini mengindikasikan kurs tidak terdistribusi normal dan cenderung dipengaruhi faktor eksternal sehingga sebelum pemodelan ARIMA tetap diperlukan transformasi atau differencing agar data menjadi stasioner.
+
+### Plot ACF
+```{r}
+acf(kurs, main="Autocorrelation Function (ACF) Kurs USD")
+```
+Berdasarkan plot ACF, terlihat bahwa autokorelasi bernilai sangat tinggi pada lag awal dan menurun secara perlahan hingga lag yang lebih panjang, namun tetap signifikan melewati batas kepercayaan. Pola ini menandakan adanya keterkaitan kuat antarperiode dan menunjukkan bahwa data kurs USD belum stasioner. Untuk mengatasi hal ini, diperlukan proses transformasi atau differencing agar sifat stasioner dapat tercapai sebelum dilakukan pemodelan ARIMA.
+
+### Uji ADF
+```{r}
+tseries::adf.test(kurs)
+```
+$H_0$ : Data tidak stasioner dalam rataan
+
+$H_1$ : Data stasioner dalam rataan
+
+Berdasarkan uji ADF tersebut, didapat *p-value* sebesar **0.7177** yang lebih besar dari taraf nyata 5%. Dengan demikian, $H_0$ gagal ditolak. Artinya, data **tidak stasioner dalam rataan** sehingga perlu dilakukan transformasi atau differencing agar data menjadi stasioner.
+
+### Plot Box-Cox
+
+```{r}
+# Model linear
+model <- lm(kurs ~ seq_along(kurs))
+
+# Box-Cox Transformation
+bc <- boxcox(model, lambda = seq(-1, 4, 0.01))
+
+# Nilai lambda optimal
+lambda_opt <- bc$x[which.max(bc$y)]
+cat("Lambda optimal:", lambda_opt, "\n")
+
+# Rentang lambda dalam CI 95%
+lambda_ci <- range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95, 1)])
+cat("Rentang lambda (95% CI):", lambda_ci, "\n")
+```
+Gambar di atas menunjukkan bahwa nilai rounded value ($\lambda$) optimum adalah –1,00, dengan selang kepercayaan 95% berada pada rentang –1,00 hingga –0,42. Karena selang kepercayaan tersebut tidak mencakup nilai $\lambda = 1$, maka dapat disimpulkan bahwa data belum stasioner dalam ragam. Oleh karena itu, disarankan untuk melakukan transformasi Box–Cox dengan $\lambda = –1$, yang ekuivalen dengan transformasi 1/Y terhadap variabel respon.
+
+## Penanganan Ketidakstasioneran dalam Ragam dan Rataan
+### Transformasi ragam (Box-Cox) untuk stabilkan ragam
+```{r}
+kurs_bc <- 1/kurs  # karena λ = -1 dari hasil Box-Cox
+```
+
+### Plot hasil transformasi
+```{r}
+kurs_bc |> as_tsibble() |> 
+  ggplot(aes(x = index, y = value)) + 
+  geom_line(color="red") +
+  theme_bw() +
+  xlab("Observasi") + ylab("Kurs USD (Box-Cox λ=-1)") +
+  ggtitle("Transformasi Box-Cox (λ = -1)")
+```
+
+###  Differencing (orde 1) untuk stabilkan rataan
+```{r}
+kurs_diff <- diff(kurs_bc, differences = 1)
+```
+
+### Plot hasil differencing
+```{r}
+kurs_diff |> ts() |> as_tsibble() |> 
+  ggplot(aes(x = index, y = value)) + 
+  geom_line(color="darkgreen") +
+  theme_bw() +
+  xlab("Observasi") + ylab("Kurs USD (Box-Cox & Differencing)") +
+  ggtitle("Transformasi Box-Cox + Differencing Orde 1")
+```
+
+### Uji ADF ulang setelah transformasi
+```{r}
+adf_test <- tseries::adf.test(na.omit(kurs_diff))
+adf_test
+```
+
+### ACF dan PACF setelah transformasi
+```{r}
+acf(na.omit(kurs_diff), main="ACF Setelah Box-Cox & Differencing")
+pacf(na.omit(kurs_diff), main="PACF Setelah Box-Cox & Differencing")
+```
+
+Setelah melalui transformasi Box–Cox dengan λ = –1 dan differencing orde 1, data kurs USD sudah stasioner baik dalam ragam maupun rataan, sehingga data telah memenuhi syarat untuk dilakukan pemodelan ARIMA.
+
