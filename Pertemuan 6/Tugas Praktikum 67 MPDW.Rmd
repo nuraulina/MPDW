@@ -1,0 +1,330 @@
+---
+title: "TUGAS 67 PRAKTIKUM MPDW"
+author: "Nur Aulina"
+date: "2025-10-01"
+output: html_document
+---
+
+
+```{r}
+library(lmtest)
+library(ggplot2)
+library(tsibble)
+library(tseries)
+library(MASS)
+library(forecast)
+library(TSA)
+library(TTR)
+library(aTSA)
+library(graphics)
+```
+
+```{r}
+dataa <- import ("https://github.com/kamaldims/MPDW/raw/main/Kurs%20Jual%20Rataan%20USD%20Fix.xlsx")
+data <- dataa[105:208,]
+
+kurs <- ts(data[[2]])
+head(kurs)
+```
+
+### Pembagian Data Training dan Testing
+```{r}
+n <- length(kurs)
+n_train <- round(0.8 * n)
+
+train <- window(kurs, end = n_train)
+test  <- window(kurs, start = n_train + 1)
+```
+
+#### Plot Deret Waktu
+
+```{r}
+kurs |> as_tsibble() |> 
+  ggplot(aes(x = index, y = value)) + 
+  geom_line(color="blue") + 
+  theme_bw() +
+  xlab("Observasi") + ylab("Kurs USD") +
+  ggtitle("Plot Deret Waktu Kurs USD")
+```
+
+```{r}
+lattice::densityplot(as.vector(kurs))
+```
+
+Distribusi kurs pada grafik density tampak tidak normal sempurna, melainkan memiliki lebih dari satu puncak (multimodal). Nilai kurs paling sering berada di kisaran Rp13.500–14.000 dan juga cukup banyak muncul di sekitar Rp15.000. Sebarannya berada antara Rp12.800 hingga Rp16.000, dengan pola yang menunjukkan adanya pergeseran level kurs pada periode tertentu. Hal ini mengindikasikan kurs tidak terdistribusi normal dan cenderung dipengaruhi faktor eksternal sehingga sebelum pemodelan ARIMA tetap diperlukan transformasi atau differencing agar data menjadi stasioner.
+
+### Plot ACF
+```{r}
+acf(train, main="Autocorrelation Function (ACF) Kurs USD")
+```
+
+Berdasarkan plot ACF, terlihat bahwa autokorelasi bernilai sangat tinggi pada lag awal dan menurun secara perlahan hingga lag yang lebih panjang, namun tetap signifikan melewati batas kepercayaan. Pola ini menandakan adanya keterkaitan kuat antarperiode dan menunjukkan bahwa data kurs USD belum stasioner. Untuk mengatasi hal ini, diperlukan proses transformasi atau differencing agar sifat stasioner dapat tercapai sebelum dilakukan pemodelan ARIMA.
+
+#### Uji ADF
+
+```{r}
+tseries::adf.test(train) 
+```
+
+$H_0$ : Data tidak stasioner dalam rataan
+
+$H_1$ : Data stasioner dalam rataan
+
+Berdasarkan uji ADF tersebut, didapat *p-value* sebesar 0.99 yang lebih besar dari taraf nyata 5% sehingga tak tolak $H_0$ dan menandakan bahwa data tidak stasioner dalam rataan sehingga perlu dilakukan transformasi atau differencing agar data menjadi stasioner.
+
+
+```{r}
+# --- UJI BOX-COX UNTUK DATA TRAIN --- #
+
+# Buat index sebagai variabel independen
+index <- seq_along(train)
+
+# Model dummy regresi linier
+lm_model <- lm(train ~ index)
+
+# Plot Box-Cox untuk menentukan lambda
+bc <- MASS::boxcox(lm_model, lambda = seq(-2, 2, by = 0.1))
+
+# Nilai lambda terbaik (maksimum likelihood)
+lambda <- bc$x[which.max(bc$y)]
+lambda
+
+# Selang kepercayaan (SK) untuk lambda
+bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]
+```
+Berdasarkan hasil uji Box–Cox, diperoleh nilai rounded value ($\lambda$) optimum sebesar –2,00 dengan selang kepercayaan 95% berada pada rentang –2,00 hingga –1,43. Karena selang kepercayaan tersebut tidak mencakup nilai $\lambda = 1$, maka dapat disimpulkan bahwa data belum stasioner dalam ragam. Oleh karena itu, disarankan untuk melakukan transformasi Box–Cox dengan $\lambda = –2$, yang ekuivalen dengan transformasi $1/Y^2$ terhadap variabel respon, sehingga dapat menstabilkan ragam data sebelum dilakukan proses differencing lebih lanjut.
+
+### Transformasi Box-Cox dengan λ = -2
+```{r}
+lambda <- -2
+train.bc <- (train^lambda - 1) / lambda   # Rumus Box-Cox umum
+```
+
+### Plot hasil transformasi
+```{r}
+plot(train.bc,
+     col = "darkred",
+     type = "o",
+     lwd = 1,
+     main = "Data Train setelah Transformasi Box-Cox (λ = -2)",
+     ylab = "Transformed Data",
+     xlab = "Time")
+```
+
+
+### Differencing
+```{r}
+ndiffs(train)
+```
+
+```{r}
+train_diff2 <- diff(train, differences = 2)
+```
+
+# Plot hasil differencing
+```{r}
+plot(train_diff2,
+     col = "red",
+     type = "o",
+     main = "Plot Train setelah Differencing 2x",
+     xlab = "Time",
+     ylab = "Differenced Data")
+```
+
+### Uji ADF ulang setelah transformasi
+```{r}
+adf_test <- tseries::adf.test(na.omit(train_diff2))
+adf_test
+```
+Karena p-value < 0.05, maka kita tolak $H_0$ dan terima $H_1$ .Artinya data train_diff2 sudah stasioner setelah transformasi dan differencing.
+
+```{r}
+### ACF dan PACF setelah Differencing (tanpa Box-Cox)
+acf(na.omit(train_diff2),
+    main = "ACF Setelah Differencing 2x")
+
+pacf(na.omit(train_diff2),
+     main = "PACF Setelah Differencing 2x")
+```
+
+Berdasarkan hasil analisis ACF dan PACF setelah dilakukan transformasi Box–Cox dan differencing sebanyak dua kali, terlihat bahwa pola ACF menunjukkan adanya spike signifikan pada lag ke-1 dengan nilai negatif, kemudian cepat turun dan sebagian besar lag berikutnya berada dalam batas signifikansi. Hal ini mengindikasikan adanya kemungkinan komponen moving average (MA) orde 1. Sementara itu, grafik PACF juga memperlihatkan spike signifikan pada lag ke-1 yang kemudian mengecil pada lag berikutnya, sehingga mengarah pada keberadaan komponen autoregressive (AR) orde 1. Dengan demikian, model yang berpotensi sesuai adalah ARIMA dengan differencing (d = 2), yaitu ARIMA(1,2,0), ARIMA(0,2,1), maupun ARIMA(1,2,1). Pemilihan model terbaik dari ketiga kandidat tersebut dapat ditentukan melalui evaluasi kriteria informasi seperti AIC atau BIC, serta uji diagnostik residual.
+
+```{r}
+eacf(train_diff2) 
+```
+
+Berdasarkan hasil analisis Extended Autocorrelation Function (EACF), terlihat adanya pola segitiga "o" yang muncul pada kombinasi AR = 2 dan MA = 0, sehingga model **ARIMA(2,2,0)** dapat menjadi kandidat yang sesuai. Selain itu, pola serupa juga muncul pada kombinasi AR = 1 dan MA = 1, sehingga **ARIMA(1,2,1)** juga dapat dipertimbangkan sebagai alternatif. Hasil ini sejalan dengan interpretasi ACF dan PACF sebelumnya, yang menunjukkan kemungkinan model ARIMA(1,2,0), ARIMA(0,2,1), maupun ARIMA(1,2,1). Dengan demikian, EACF memperkuat dugaan model yang sama serta memberikan tambahan kandidat ARIMA(2,2,0) untuk dipertimbangkan lebih lanjut pada tahap estimasi parameter dan uji diagnostik residual.
+
+
+### PENDUGAAN PARAMETER MODEL
+```{r}
+# Model 1: ARIMA(1,2,0)
+model1 <- Arima(train, order=c(1,2,0), method="ML")
+summary(model1)
+coeftest(model1)
+
+# Model 2: ARIMA(0,2,1)
+model2 <- Arima(train, order=c(0,2,1), method="ML")
+summary(model2)
+coeftest(model2)
+
+# Model 3: ARIMA(1,2,1)
+model3 <- Arima(train, order=c(1,2,1), method="ML")
+summary(model3)
+coeftest(model3)
+
+# Model 4: ARIMA(2,2,0)
+model4 <- Arima(train, order=c(2,2,0), method="ML")
+summary(model4)
+coeftest(model4)
+```
+
+Berdasarkan hasil estimasi empat model ARIMA kandidat, dapat dilihat bahwa model ARIMA(0,2,1) dan ARIMA(1,2,1) menunjukkan performa yang lebih baik dibandingkan model lainnya. Hal ini ditunjukkan oleh nilai AIC yang relatif paling kecil, yaitu 929,26 pada ARIMA(1,2,1) dan 929,69 pada ARIMA(0,2,1), jauh lebih rendah daripada ARIMA(1,2,0) (AIC = 959,92) maupun ARIMA(2,2,0) (AIC = 946,66). Selain itu, model ARIMA(1,2,1) memiliki RMSE, MAE, dan MAPE terkecil (RMSE = 70,53; MAE = 44,55; MAPE = 0,318) dibandingkan model lain, sehingga mampu memberikan hasil peramalan yang lebih akurat. Dari sisi signifikansi parameter, ARIMA(0,2,1) memiliki parameter MA yang signifikan, sementara pada ARIMA(1,2,1) parameter MA signifikan tetapi AR tidak signifikan. Namun demikian, karena secara keseluruhan *ARIMA(1,2,1)* menghasilkan nilai error terkecil dan AIC paling rendah, maka model ini dapat dipilih sebagai model terbaik untuk digunakan dalam peramalan data deret waktu tersebut.
+
+
+### Analisis Sisaan
+
+Model terbaik sudah dipilih, tapi apakah ia "sehat"? Sisaan (*residuals*) dari model yang baik harus memenuhi beberapa asumsi:
+
+-   **Normalitas:** Sisaan menyebar normal.
+
+-   **Independensi:** Tidak ada autokorelasi antar sisaan (saling bebas).
+
+-   **Homoskedastisitas:** Ragam sisaan homogen (konstan).
+
+-   **Rataan Nol:** Rata-rata sisaan sama dengan nol.
+
+#### Eksplorasi Sisaan
+
+```{r}
+#Eksplorasi
+sisaan <- model3$residuals
+par(mfrow=c(2,2))
+#qqnorm(sisaan)
+#qqline(sisaan, col = "blue", lwd = 2)
+car::qqPlot(sisaan)
+plot(c(1:length(sisaan)),sisaan)
+acf(sisaan)
+pacf(sisaan)
+par(mfrow = c(1,1))
+```
+
+Berdasarkan hasil plot sisaan model ARIMA(1,2,1), terlihat bahwa titik-titik pada plot kuantil normal sebagian besar mengikuti garis diagonal, menandakan bahwa sisaan secara umum menyebar normal. Plot sisaan terhadap waktu menunjukkan sebaran yang acak dengan lebar pita yang relatif seragam, sehingga dapat dikatakan bahwa ragam sisaan homogen. Selain itu, pada plot ACF tidak terdapat spike yang melewati batas signifikansi, yang berarti tidak ada autokorelasi antar sisaan. Dengan demikian, secara eksploratif dapat disimpulkan bahwa sisaan bersifat normal, homogen, dan saling bebas, sehingga model ARIMA(1,2,1) telah memenuhi asumsi dasar model deret waktu dan layak digunakan untuk peramalan.
+
+#### <span style="color:maroon"><b>Uji Formal</b></span>
+
+```{r}
+#1) Sisaan Menyebar Normal
+ks.test(sisaan,"pnorm") 
+#tak tolak H0 > sisaan menyebar normal
+```
+
+Pada tahapan ini uji formal yang digunakan untuk normalitas adalah uji Kolmogorov-Smirnov (KS). Hipotesis pada uji KS adalah sebagai berikut.
+
+$H_0$ : Sisaan menyebar normal
+
+$H_1$ : Sisaan tidak menyebar normal
+
+Berdasarkan uji KS tersebut, didapat *p-value* sebesar 2.2e-16 yang lebih kecil dari taraf nyata 5% sehingga tolak $H_0$ dan menandakan bahwa sisaan tidak menyebar normal. Dengan demikian, meskipun asumsi normalitas tidak terpenuhi, model ARIMA yang diperoleh tetap valid digunakan untuk keperluan peramalan, karena syarat utama dalam pemodelan deret waktu adalah residual harus bersifat white noise.
+
+```{r}
+#2) Sisaan saling bebas/tidak ada autokorelasi
+Box.test(sisaan, type = "Ljung") 
+#tak tolak H0 > sisaan saling bebas
+```
+
+Selanjutnya akan dilakukan uji formal untuk kebebasan sisaan menggunakan uji Ljung-Box. Hipotesis yang digunakan adalah sebagai berikut.
+
+$H_0$ : Sisaan saling bebas
+
+$H_1$ : Sisaan tidak tidak saling bebas
+
+Berdasarkan uji Ljung-Box tersebut, didapat *p-value* sebesar 0.7745 yang lebih besar dari taraf nyata 5% sehingga tak tolak $H_0$ dan menandakan bahwa sisaan saling bebas. Hal ini berbeda dengan eksplorasi.
+
+```{r}
+#3) Sisaan homogen
+Box.test((sisaan)^2, type = "Ljung") 
+#tak tolak H0 > sisaan homogen
+```
+
+Hipotesis yang digunakan untuk uji kehomogenan ragam adalah sebagai berikut.
+
+$H_0$ : Ragam sisaan homogen
+
+$H_1$ : Ragam sisaan tidak homogen
+
+Berdasarkan uji Ljung-Box terhadap sisaan kuadrat tersebut, didapat *p-value* sebesar 0.1455 yang lebih besar dari taraf nyata 5% sehingga tak tolak $H_0$ dan menandakan bahwa ragam sisaan homogen.
+
+
+```{r}
+#4) Nilai tengah sisaan sama dengan nol
+t.test(sisaan, mu = 0, conf.level = 0.95) 
+#tak tolak h0 > nilai tengah sisaan sama dengan 0
+```
+Terakhir, dengan uji-t, akan dicek apakah nilai tengah sisaan sama dengan nol. Hipotesis yang diujikan sebagai berikut.
+
+$H_0$ : nilai tengah sisaan sama dengan 0
+
+$H_1$ : nilai tengah sisaan tidak sama dengan 0
+
+Berdasarkan uji-t tersebut, didapat *p-value* sebesar 0.3085 yang lebih besar dari taraf nyata 5% sehingga tak tolak $H_0$ dan menandakan bahwa nilai tengah sisaan sama dengan nol. 
+
+
+### OVERFITTING DARI ARIMA(1,2,1) 
+```{r}
+# Tambahkan 1 AR → ARIMA(2,2,1)
+model_over1 <- Arima(train, order=c(2,2,1), method="ML")
+summary(model_over1)
+lmtest::coeftest(model_over1)
+
+# Tambahkan 1 MA → ARIMA(1,2,2)
+model_over2 <- Arima(train, order=c(1,2,2), method="ML")
+summary(model_over2)
+lmtest::coeftest(model_over2)
+```
+
+Hasil overfitting pada model ARIMA(1,2,1) menghasilkan dua alternatif, yaitu ARIMA(2,2,1) dan ARIMA(1,2,2). Model ARIMA(2,2,1) menunjukkan nilai AIC yang lebih rendah dibandingkan model awal, yaitu sebesar 923,24, namun tidak semua parameternya signifikan, di mana koefisien AR(1) memiliki nilai *p-value* sebesar 0,068 sehingga tidak signifikan pada taraf nyata 5%. Sementara itu, model ARIMA(1,2,2) juga memiliki nilai AIC lebih kecil dari model awal (928,35), tetapi koefisien AR(1) juga tidak signifikan dengan *p-value* sebesar 0,435. Dengan demikian, meskipun overfitting memberikan nilai AIC yang sedikit lebih baik, model yang dihasilkan menjadi kurang efisien karena adanya parameter yang tidak signifikan. Berdasarkan prinsip parsimoni, model ARIMA(1,2,1) tetap dipilih sebagai model terbaik karena lebih sederhana dan semua parameternya signifikan.
+
+
+### Peramalan
+
+Peramalan dilakukan menggunakan fungsi `forecast()` . Contoh peramalan berikut ini dilakukan untuk 30 hari ke depan.
+
+```{r}
+#---FORECAST---#
+ramalan <- forecast::forecast(model3, h = 30) 
+ramalan
+data.ramalan <- ramalan$mean
+plot(ramalan)
+```
+
+Berdasarkan hasil peramalan menggunakan model ARIMA(1,2,1) untuk 30 periode ke depan, diperoleh bahwa nilai ramalan menunjukkan tren meningkat secara bertahap. Nilai titik tengah (point forecast) pada periode ke-84 hingga ke-113 meningkat dari sekitar 15.322 menjadi 16.630, yang menandakan adanya kecenderungan kenaikan pada variabel yang dianalisis.
+
+Secara visual pada grafik, garis biru menggambarkan nilai ramalan utama (point forecast), sedangkan area bayangan berwarna biru muda dan gelap merepresentasikan interval kepercayaan 80% dan 95%. Garis ramalan yang terus meningkat dengan interval yang masih relatif sempit menunjukkan bahwa model ARIMA(1,2,1) mampu menangkap pola tren naik dengan cukup baik, meskipun ketidakpastian makin besar pada periode yang lebih jauh.
+
+Dengan demikian, hasil peramalan ini menunjukkan bahwa variabel yang diamati diproyeksikan akan terus mengalami peningkatan dalam jangka pendek, dan model ARIMA(1,2,1) dapat digunakan sebagai dasar untuk memprediksi kecenderungan nilai di masa depan.
+
+
+```{r}
+pt_1 <- tail(train, 1)
+hasil.forc.diff <- data.ramalan
+hasil <- diffinv(hasil.forc.diff, differences = 2) + pt_1
+ts.plot(train, hasil)
+```
+
+
+```{r}
+perbandingan<-matrix(data=c(test, data.ramalan),
+                     nrow = 30, ncol = 2)
+colnames(perbandingan)<-c("Aktual","Hasil Forecast")
+perbandingan
+accuracy(data.ramalan, test)
+```
+
+Berdasarkan hasil evaluasi, model ARIMA(1,2,1) menghasilkan tingkat kesalahan MAPE sebesar 9,53%, menunjukkan kemampuan prediksi yang cukup baik meskipun cenderung melebihkan hasil aktual sekitar 9%. Namun, nilai ACF1 sebesar 0,788 mengindikasikan adanya autokorelasi pada sisaan dan nilai Theil’s U yang besar menunjukkan bahwa model masih dapat disempurnakan untuk meningkatkan akurasi peramalan di masa mendatang. Dengan demikian, model perlu diperbaiki, misalnya dengan mencoba spesifikasi ARIMA lain atau mempertimbangkan model alternatif (misalnya ARIMAX atau SARIMA jika ada pola musiman/korelasi dengan variabel eksternal).
+
+
+
+
+
+
